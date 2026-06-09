@@ -1,74 +1,34 @@
-import sqlite3
 from datetime import datetime
-from pathlib import Path
 
 
-HISTORY_DB = Path("stock_analyzer_history.sqlite3")
+_FALLBACK_STATE = {
+    "analysis_runs": [],
+    "analysis_items": {},
+    "next_run_id": 1,
+}
 
 
-def _connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(HISTORY_DB, timeout=30)
-    conn.row_factory = sqlite3.Row
-    _init_db(conn)
-    return conn
+def _state_value(name: str, default):
+    try:
+        import streamlit as st
 
-
-def _init_db(conn: sqlite3.Connection) -> None:
-    conn.execute("pragma journal_mode = wal")
-    conn.execute("pragma busy_timeout = 30000")
-    conn.execute(
-        """
-        create table if not exists analysis_runs (
-            run_id integer primary key autoincrement,
-            run_at text not null,
-            stock_count integer not null,
-            buy_count integer not null,
-            hold_count integer not null,
-            sell_count integer not null,
-            na_count integer not null,
-            total_buy_value real,
-            total_closing_value real,
-            total_unrealized_pnl real,
-            avg_score real
-        )
-        """
-    )
-    conn.execute(
-        """
-        create table if not exists analysis_items (
-            item_id integer primary key autoincrement,
-            run_id integer not null,
-            stock_name text not null,
-            nse_symbol text,
-            score real,
-            recommendation text,
-            closing_value real,
-            unrealized_pnl real,
-            explanation text,
-            foreign key (run_id) references analysis_runs(run_id)
-        )
-        """
-    )
-    conn.commit()
+        if name not in st.session_state:
+            st.session_state[name] = default() if callable(default) else default
+        return st.session_state[name]
+    except Exception:
+        if name not in _FALLBACK_STATE:
+            _FALLBACK_STATE[name] = default() if callable(default) else default
+        return _FALLBACK_STATE[name]
 
 
 def latest_items_by_symbol() -> dict:
-    with _connect() as conn:
-        latest_run = conn.execute(
-            "select run_id from analysis_runs order by run_id desc limit 1"
-        ).fetchone()
-        if latest_run is None:
-            return {}
+    runs = _state_value("analysis_runs", list)
+    if not runs:
+        return {}
 
-        rows = conn.execute(
-            """
-            select stock_name, nse_symbol, score, recommendation
-            from analysis_items
-            where run_id = ?
-            """,
-            (latest_run["run_id"],),
-        ).fetchall()
-
+    latest_run_id = runs[-1]["run_id"]
+    items_by_run = _state_value("analysis_items", dict)
+    rows = items_by_run.get(latest_run_id, [])
     return {
         (row["nse_symbol"] or row["stock_name"]).upper(): {
             "previous_score": row["score"],
@@ -79,84 +39,61 @@ def latest_items_by_symbol() -> dict:
 
 
 def save_analysis_run(results) -> int:
+    runs = _state_value("analysis_runs", list)
+    items_by_run = _state_value("analysis_items", dict)
+    run_id = _next_run_id()
     rec_counts = results["recommendation"].value_counts()
     numeric_score = results["score"].dropna()
-    run_at = datetime.now().isoformat(timespec="seconds")
 
-    with _connect() as conn:
-        cursor = conn.execute(
-            """
-            insert into analysis_runs (
-                run_at,
-                stock_count,
-                buy_count,
-                hold_count,
-                sell_count,
-                na_count,
-                total_buy_value,
-                total_closing_value,
-                total_unrealized_pnl,
-                avg_score
-            )
-            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                run_at,
-                len(results),
-                int(rec_counts.get("BUY", 0)),
-                int(rec_counts.get("HOLD", 0)),
-                int(rec_counts.get("SELL", 0)),
-                int(rec_counts.get("N/A", 0)),
-                _sum_column(results, "buy_value"),
-                _sum_column(results, "closing_value"),
-                _sum_column(results, "unrealized_pnl"),
-                float(numeric_score.mean()) if not numeric_score.empty else None,
-            ),
-        )
-        run_id = cursor.lastrowid
+    runs.append(
+        {
+            "run_id": run_id,
+            "run_at": datetime.now().isoformat(timespec="seconds"),
+            "stock_count": len(results),
+            "buy_count": int(rec_counts.get("BUY", 0)),
+            "hold_count": int(rec_counts.get("HOLD", 0)),
+            "sell_count": int(rec_counts.get("SELL", 0)),
+            "na_count": int(rec_counts.get("N/A", 0)),
+            "total_buy_value": _sum_column(results, "buy_value"),
+            "total_closing_value": _sum_column(results, "closing_value"),
+            "total_unrealized_pnl": _sum_column(results, "unrealized_pnl"),
+            "avg_score": float(numeric_score.mean()) if not numeric_score.empty else None,
+        }
+    )
 
-        for _, row in results.iterrows():
-            conn.execute(
-                """
-                insert into analysis_items (
-                    run_id,
-                    stock_name,
-                    nse_symbol,
-                    score,
-                    recommendation,
-                    closing_value,
-                    unrealized_pnl,
-                    explanation
-                )
-                values (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    run_id,
-                    row.get("stock_name"),
-                    row.get("nse_symbol"),
-                    row.get("score"),
-                    row.get("recommendation"),
-                    row.get("closing_value"),
-                    row.get("unrealized_pnl"),
-                    row.get("explanation"),
-                ),
-            )
-        conn.commit()
+    items_by_run[run_id] = [
+        {
+            "stock_name": row.get("stock_name"),
+            "nse_symbol": row.get("nse_symbol"),
+            "score": row.get("score"),
+            "recommendation": row.get("recommendation"),
+            "closing_value": row.get("closing_value"),
+            "unrealized_pnl": row.get("unrealized_pnl"),
+            "explanation": row.get("explanation"),
+        }
+        for _, row in results.iterrows()
+    ]
     return run_id
 
 
 def load_recent_runs(limit: int = 10):
-    with _connect() as conn:
-        rows = conn.execute(
-            """
-            select *
-            from analysis_runs
-            order by run_id desc
-            limit ?
-            """,
-            (limit,),
-        ).fetchall()
-    return [dict(row) for row in rows]
+    runs = _state_value("analysis_runs", list)
+    return list(reversed(runs[-limit:]))
+
+
+def _next_run_id() -> int:
+    try:
+        import streamlit as st
+
+        if "next_run_id" not in st.session_state:
+            st.session_state["next_run_id"] = 1
+        run_id = st.session_state["next_run_id"]
+        st.session_state["next_run_id"] += 1
+        return run_id
+    except Exception:
+        run_id = _FALLBACK_STATE["next_run_id"]
+        _FALLBACK_STATE["next_run_id"] += 1
+        return run_id
 
 
 def _sum_column(frame, column: str) -> float | None:
