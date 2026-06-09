@@ -1,0 +1,4 @@
+__pycache__/
+*.py[cod]
+stock_analyzer_cache.sqlite3*
+stock_analyzer_history.sqlite3*
