@@ -105,6 +105,78 @@ def _metric_from_label(soup: BeautifulSoup, labels: list[str]) -> float | None:
     return None
 
 
+def _extract_numeric_from_element(element) -> float | None:
+    if element is None:
+        return None
+    text = element.get_text(" ", strip=True)
+    return _parse_number(text)
+
+
+def _find_label_value(soup: BeautifulSoup, labels: list[str]) -> float | None:
+    label_re = re.compile(r"\b(" + "|".join(re.escape(label) for label in labels) + r")\b", flags=re.I)
+    for text_node in soup.find_all(string=label_re):
+        parent = text_node.parent
+        if parent is None:
+            continue
+
+        # Prefer the full parent block if it contains both label and a numeric value
+        numeric = _find_numeric_in_block(parent)
+        if numeric is not None:
+            return numeric
+
+        # Try sibling nodes when label and value are separated
+        for sibling in parent.find_next_siblings():
+            numeric = _extract_numeric_from_element(sibling)
+            if numeric is not None:
+                return numeric
+
+        if parent.parent is not None:
+            numeric = _find_numeric_in_block(parent.parent)
+            if numeric is not None:
+                return numeric
+    return None
+
+
+def _find_numeric_in_block(element) -> float | None:
+    text = element.get_text(" ", strip=True)
+    if not text:
+        return None
+    values = re.findall(r"-?\d+(?:\.\d+)?", text.replace(",", ""))
+    if not values:
+        return None
+    return float(values[-1])
+
+
+def _extract_closing_price(soup: BeautifulSoup) -> float | None:
+    # Search for the explicit current/close price label first
+    for labels in [
+        ["current price"],
+        ["close price", "closing price", "close"],
+        ["last price", "ltp"],
+    ]:
+        value = _find_label_value(soup, labels)
+        if value is not None and value > 0:
+            return value
+
+    # Try structured metadata first
+    tag = soup.find(attrs={"itemprop": "price"})
+    if tag:
+        parsed = _parse_number(tag.get_text(" ", strip=True))
+        if parsed is not None and parsed > 0:
+            return parsed
+
+    # As a fallback, look for the first strong price-like value in the summary page
+    candidates = []
+    for node in soup.find_all(text=re.compile(r"\b(?:₹|rs\.?|\d{3,})\b", flags=re.I)):
+        parent = node.parent
+        if parent is None:
+            continue
+        numeric = _find_numeric_in_block(parent)
+        if numeric is not None and numeric > 0:
+            candidates.append(numeric)
+    return candidates[0] if candidates else None
+
+
 def scrape_metrics(symbol: str) -> dict:
     return scrape_metrics_details(symbol)["metrics"]
 
@@ -184,6 +256,10 @@ def scrape_metrics_details(symbol: str, use_cache: bool = True) -> dict:
                 elif "roe" in label:
                     metrics["roe_change"] = change
 
+        # Also extract absolute ROCE / ROE values when present elsewhere on the page
+        metrics["roce"] = _metric_from_label(soup, ["roce", "return on capital employed"]) 
+        metrics["roe"] = _metric_from_label(soup, ["roe", "return on equity"]) 
+
         metrics["debt_to_equity"] = _metric_from_label(
             soup, ["debt to equity", "debt/equity", "debt equity"]
         )
@@ -193,6 +269,9 @@ def scrape_metrics_details(symbol: str, use_cache: bool = True) -> dict:
         metrics["industry_pe"] = _metric_from_label(
             soup, ["industry p/e", "industry pe"]
         )
+
+        # Try to extract the latest market close/last traded price
+        metrics["closing_price"] = _extract_closing_price(soup)
 
         missing_count = sum(metrics.get(column) is None for column in METRIC_COLUMNS)
         if missing_count == len(METRIC_COLUMNS):

@@ -8,6 +8,7 @@ from history_store import latest_items_by_symbol, load_recent_runs, save_analysi
 from scorer import score_stock_explained
 from scraper import scrape_metrics_details
 from symbol_resolver import resolve_symbol_details
+from ai_assistant import render_chat_interface
 
 
 RESULT_COLUMNS = [
@@ -125,6 +126,44 @@ def show_history() -> None:
     st.dataframe(history, use_container_width=True, hide_index=True)
 
 
+def render_analysis_dashboard(results: pd.DataFrame, df: pd.DataFrame) -> None:
+    st.subheader("Portfolio Dashboard")
+    show_portfolio_dashboard(results)
+
+    display_df = results.copy()
+    percent_cols = [
+        "qoq_profit_change_pct",
+        "fii_change_pct",
+        "dii_change_pct",
+        "roce_change",
+        "roe_change",
+        "roce",
+        "roe",
+        "promoter_holding_pct",
+        "pledged_shares_pct",
+        "sales_growth_pct",
+    ]
+
+    for col in percent_cols:
+        if col in display_df.columns:
+            display_df[col] = display_df[col].apply(
+                lambda v: f"{v:.2f}%" if (pd.notna(v) and isinstance(v, (int, float))) else v
+            )
+
+    styled = display_df.style.map(color_rec, subset=["recommendation"])
+    st.subheader("Analysis Results")
+    st.dataframe(styled, use_container_width=True)
+    st.download_button(
+        "Download Enriched CSV",
+        to_csv_bytes(results),
+        "portfolio_analysis.csv",
+        "text/csv",
+    )
+
+    st.divider()
+    render_chat_interface(results, df)
+
+
 st.set_page_config(page_title="Portfolio Analyzer", layout="wide")
 st.title("Indian Stock Portfolio Analyzer")
 show_history()
@@ -132,6 +171,22 @@ show_history()
 uploaded = st.file_uploader("Upload your portfolio CSV", type=["csv"])
 
 if uploaded:
+    if "analysis_results" not in st.session_state:
+        st.session_state.analysis_results = None
+        st.session_state.analysis_df = None
+        st.session_state.uploaded_filename = ""
+        st.session_state.chat_history = []
+        st.session_state.portfolio_context = ""
+        st.session_state.ai_provider = None
+
+    if uploaded.name != st.session_state.uploaded_filename:
+        st.session_state.analysis_results = None
+        st.session_state.analysis_df = None
+        st.session_state.uploaded_filename = uploaded.name
+        st.session_state.chat_history = []
+        st.session_state.portfolio_context = ""
+        st.session_state.ai_provider = None
+
     try:
         df = parse_csv(uploaded)
     except ValueError as e:
@@ -139,7 +194,9 @@ if uploaded:
         st.stop()
 
     st.subheader("Portfolio Preview")
-    st.dataframe(df, use_container_width=True)
+    preview_cols = ["stock_name", "quantity", "avg_buy_price"]
+    preview_df = df[preview_cols].copy()
+    st.dataframe(preview_df, use_container_width=True)
 
     st.subheader("Symbol Mapping")
     st.caption("Edit nse_symbol if Screener resolves the wrong company.")
@@ -182,15 +239,35 @@ if uploaded:
                 details = scrape_metrics_details(symbol)
                 metrics = details["metrics"]
                 score, rec, explanation = score_stock_explained(metrics)
+                # compute market-derived values and store back into the original df
+                closing_price = metrics.get("closing_price")
+                if closing_price is not None and closing_price <= 0:
+                    closing_price = None
+
+                buy_value = row.get("buy_value") if row.get("buy_value") is not None else (
+                    row["quantity"] * row["avg_buy_price"]
+                )
+                closing_value = (
+                    row["quantity"] * closing_price if closing_price is not None else None
+                )
+                unrealized_pnl = (
+                    closing_value - buy_value if closing_value is not None and buy_value is not None else None
+                )
+
+                # update the dataframe so dashboard computations work correctly
+                df.at[position - 1, "closing_price"] = closing_price
+                df.at[position - 1, "closing_value"] = closing_value
+                df.at[position - 1, "unrealized_pnl"] = unrealized_pnl
+
                 result_row = {
-                        "nse_symbol": symbol,
-                        **metrics,
-                        "score": score,
-                        "recommendation": rec,
-                        "explanation": explanation,
-                        "fetch_status": details["status"],
-                        "data_source": "cache" if details["from_cache"] else "screener",
-                        "error_message": details["error_message"] or "",
+                    "nse_symbol": symbol,
+                    **metrics,
+                    "score": score,
+                    "recommendation": rec,
+                    "explanation": explanation,
+                    "fetch_status": details["status"],
+                    "data_source": "cache" if details["from_cache"] else "screener",
+                    "error_message": details["error_message"] or "",
                 }
                 extra_rows.append(add_history_comparison(result_row, previous_items))
 
@@ -211,15 +288,8 @@ if uploaded:
         run_id = save_analysis_run(results)
         st.success(f"Saved analysis run #{run_id}.")
 
-        st.subheader("Portfolio Dashboard")
-        show_portfolio_dashboard(results)
+        st.session_state.analysis_results = results
+        st.session_state.analysis_df = df
 
-        styled = results.style.map(color_rec, subset=["recommendation"])
-        st.subheader("Analysis Results")
-        st.dataframe(styled, use_container_width=True)
-        st.download_button(
-            "Download Enriched CSV",
-            to_csv_bytes(results),
-            "portfolio_analysis.csv",
-            "text/csv",
-        )
+    if st.session_state.analysis_results is not None:
+        render_analysis_dashboard(st.session_state.analysis_results, st.session_state.analysis_df)
