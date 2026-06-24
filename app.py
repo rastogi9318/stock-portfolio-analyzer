@@ -293,3 +293,6 @@ if uploaded:
 
     if st.session_state.analysis_results is not None:
         render_analysis_dashboard(st.session_state.analysis_results, st.session_state.analysis_df)
+
+st.markdown("---")
+st.caption("© MMS Consultancy Services")
