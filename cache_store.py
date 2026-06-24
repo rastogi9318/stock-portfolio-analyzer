@@ -9,6 +9,8 @@ METRIC_COLUMNS = [
     "dii_change_pct",
     "roce_change",
     "roe_change",
+    "roce",
+    "roe",
     "debt_to_equity",
     "promoter_holding_pct",
     "pledged_shares_pct",
