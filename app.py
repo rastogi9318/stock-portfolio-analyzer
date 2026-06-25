@@ -168,7 +168,7 @@ st.set_page_config(page_title="Portfolio Analyzer", layout="wide")
 st.title("Indian Stock Portfolio Analyzer")
 show_history()
 
-uploaded = st.file_uploader("Upload your portfolio CSV", type=["csv"])
+uploaded = st.file_uploader("Upload your portfolio file", type=["csv", "xls", "xlsx"])
 
 if uploaded:
     if "analysis_results" not in st.session_state:
