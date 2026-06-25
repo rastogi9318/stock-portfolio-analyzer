@@ -39,18 +39,20 @@ Start the app:
 streamlit run app.py
 ```
 
-1. Upload your portfolio CSV file
+1. Upload your portfolio CSV or Excel file
 2. Review and edit the symbol mapping if needed
 3. Click "Run Analysis" to analyze your portfolio
 4. After analysis, use the **AI Investment Advisor** to discuss insights and ask questions about your holdings
 5. Download the enriched CSV with analysis results
 
-## Portfolio CSV Format
+## Portfolio Input Format
 
-Your CSV should have the following columns:
-- `stock_name`: Name of the company (e.g., "Infosys")
-- `quantity`: Number of shares held
-- `avg_buy_price`: Average buying price per share
+The app now accepts CSV and Excel files and will automatically normalize columns. It keeps only the portfolio fields needed for analysis:
+- `stock_name` / `stock` / `name` / `company` / `company_name` / `ticker`
+- `quantity` / `qty` / `shares` / `share_count` / `no_of_shares`
+- `avg_buy_price` / `average_buy_price` / `buy_price` / `avg_cost` / `cost_price`
+
+If the file contains `buy_value` / `investment_value` / `invested_value`, the app will compute `avg_buy_price` from quantity.
 
 Example:
 ```
